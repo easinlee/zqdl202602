@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>直播间</title>
+<meta name="referrer" content="no-referrer-when-downgrade">
+<style>
+  html,body{margin:0;width:100%;height:100%;background:#0f1420;overflow:hidden}
+  #frame{display:block;width:100%;height:100%;border:0}
+  #tip{position:fixed;inset:0;z-index:9;display:grid;place-items:center;background:#0f1420;color:#9aa4b2;
+       font:15px/1.6 system-ui,-apple-system,"PingFang SC",sans-serif;transition:opacity .25s}
+  #tip.hide{opacity:0;pointer-events:none}
+  #dbg{position:fixed;left:0;right:0;bottom:0;z-index:10;padding:6px 10px;display:none;
+       background:rgba(11,15,26,.9);color:#7f8ca6;font:11px/1.5 ui-monospace,Menlo,Consolas,monospace;
+       white-space:pre-wrap;max-height:36%;overflow:auto}
+</style>
+</head>
+<body>
+<iframe id="frame" src="about:blank" referrerpolicy="origin" allowfullscreen></iframe>
+<div id="tip">正在进入直播间…</div>
+<pre id="dbg"></pre>
+
+<script>
+(function(){
+  /* ============================================================
+     专用壳 · 绑定直播间 id=4
+     房间码   3cTF8K
+     口令     2kocjsNVsLVC39E6
+     名称     静静❤️记录生活
+     后端     uiaocu.cn (新域名)
+     ============================================================ */
+
+  // 后端域名：依次探测，第一个能通的就用它
+  var CONFIG_SOURCES = [
+    'https://bbeytz.cn',
+    'https://cseibg.cn' // 保留一个备用老域名，以防新域名出问题
+  ];
+
+  // 全部失败时的兜底
+  var FALLBACK_BASE = 'https://cseibg.cn';
+  var FALLBACK_ROOM = '3cTF8K';
+  var FALLBACK_KEY  = '2kocjsNVsLVC39E6';
+  /* ============================================================ */
+
+  var frame = document.getElementById('frame');
+  var tip   = document.getElementById('tip');
+  var dbg   = document.getElementById('dbg');
+  var DEBUG = /[?&]debug=1/.test(location.search);
+
+  function log(s){
+    if (!DEBUG) return;
+    dbg.style.display = 'block';
+    dbg.textContent += s + '\n';
+    dbg.scrollTop = dbg.scrollHeight;
+  }
+
+  // 1) 取回跳凭证
+  var params = new URLSearchParams(location.search);
+  var token     = params.get('wx_token') || '';
+  var afterAuth = params.get('after_auth') || '';
+  if (token || afterAuth) {
+    params.delete('wx_token'); params.delete('after_auth');
+    var clean = params.toString();
+    history.replaceState(null, '', location.pathname + (clean ? '?' + clean : '') + location.hash);
+  }
+
+  // 2) hash 可覆盖房间
+  function hashQuery(){
+    var h = location.hash || '';
+    var i = h.indexOf('?');
+    return new URLSearchParams(i < 0 ? '' : h.slice(i + 1));
+  }
+
+  function roomFromHash(){
+    var m = (location.hash || '').match(/#\/r\/([^?\/&]+)/);
+    if (!m) return null;
+    var q = hashQuery();
+    return {
+      code: decodeURIComponent(m[1]),
+      key: q.get('k') || '',
+      action: q.get('after_auth') || ''
+    };
+  }
+
+  // 3) 探测可用后端域名
+  function pickBase(){
+    var i = 0;
+    return new Promise(function(resolve){
+      (function next(){
+        if (i >= CONFIG_SOURCES.length) { log('[后端] 全部失败，用兜底'); resolve(FALLBACK_BASE); return; }
+        var src = CONFIG_SOURCES[i++];
+        var ctl = new AbortController();
+        var timer = setTimeout(function(){ ctl.abort(); }, 4000);
+        fetch(src + '/api/public/site-config', {signal: ctl.signal})
+          .then(function(r){ return r.json(); })
+          .then(function(d){
+            clearTimeout(timer);
+            if (d && d.share_base) { log('[后端] ' + src + ' 可用'); resolve(d.share_base); }
+            else { next(); }
+          })
+          .catch(function(){ clearTimeout(timer); log('[后端] ' + src + ' 失败'); next(); });
+      })();
+    });
+  }
+
+  // 4) hash 优先，否则固定 4 号
+  function resolveRoom(){
+    var h = roomFromHash();
+    if (h && h.code) {
+      log('[房间] hash 指定: ' + h.code);
+      return Promise.resolve({ code: h.code, key: h.key, action: h.action, base: null });
+    }
+    log('[房间] 使用默认 4 号: ' + FALLBACK_ROOM);
+    return pickBase().then(function(base){
+      return { code: FALLBACK_ROOM, key: FALLBACK_KEY, action: afterAuth, base: base };
+    });
+  }
+
+  resolveRoom().then(function(r){
+    var base = r.base || FALLBACK_BASE;
+    var src = base.replace(/\/+$/, '') + '/r/' + encodeURIComponent(r.code) + '?k=' + encodeURIComponent(r.key);
+    if (token) src += '&wx_token=' + encodeURIComponent(token);
+    var act = r.action || afterAuth;
+    if (act) src += '&after_auth=' + encodeURIComponent(act);
+    log('[直播] iframe -> ' + src);
+    frame.src = src;
+  });
+
+  frame.addEventListener('load', function(){ setTimeout(function(){ tip.classList.add('hide'); }, 250); });
+  setTimeout(function(){ tip.classList.add('hide'); }, 6000);
+
+  // 5) 顶层代办授权/支付
+  window.addEventListener('message', function(ev){
+    var d = ev.data || {};
+
+    if (d.type === 'wx-auth-please' && d.authUrl) {
+      log('[登录] 顶层跳转授权');
+      try {
+        var u = new URL(d.authUrl);
+        var h = location.hash || '';
+        var hi = h.indexOf('?');
+        var hbase = hi < 0 ? h : h.slice(0, hi);
+        var hq = new URLSearchParams(hi < 0 ? '' : h.slice(hi + 1));
+        if (d.action) hq.set('after_auth', d.action);
+        var hs = hq.toString();
+        var shellRet = location.origin + location.pathname + location.search + hbase + (hs ? '?' + hs : '');
+        u.searchParams.set('ret', shellRet);
+        location.href = u.toString();
+      } catch (e) { location.href = d.authUrl; }
+      return;
+    }
+
+    if (d.type === 'wx-pay-please' && d.url) {
+      log('[支付] 顶层跳转收银台');
+      try {
+        var u2 = new URL(d.url, location.origin);
+        u2.searchParams.set('ret', location.href.split('#')[0]);
+        location.href = u2.toString();
+      } catch (e) { location.href = d.url; }
+      return;
+    }
+  });
+})();
+</script>
+</body>
+</html>
